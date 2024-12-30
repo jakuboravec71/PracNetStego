@@ -1,0 +1,126 @@
+#!/usr/bin/python
+
+from netfilterqueue import NetfilterQueue
+from scapy.all import *
+
+
+def isAnIP(string):
+    address = sys.argv[1].split('.')
+    numOctets = len(address)
+    numValid = 0
+
+    for i in range(0, numOctets):
+        try:
+            if int(address[i]) >= 0 and int(address[i]) < 256:
+                numValid = numValid + 1
+            else:
+                return False
+        except ValueError:
+            return False
+
+    if numValid < numOctets or numOctets != 4:
+        return False
+    else:
+        return True
+
+
+def process(pkt):
+
+    #declaration of global variables
+    global idxSnd
+    global origIcmpData
+
+    #conversion to a Scapy packet
+    scapyPkt = IP(pkt.get_payload())
+
+    #check if Scapy packet has ICMP and Raw layers
+    if scapyPkt.haslayer('ICMP') and scapyPkt.haslayer('Raw'):
+
+        #steps for both received and sent packets
+        #acquisition of data after Seq Num field and data type conversion
+        icmpData = list(scapyPkt[Raw].load)
+
+
+        #steps for received packets
+        if scapyPkt[IP].src == sys.argv[1]:
+
+            #acquisition of secret message from ICMP Data field
+            rcvMessage = ''.join(chr(i) for i in icmpData[:lenPart])
+
+
+        #steps for sent packets
+        elif scapyPkt[IP].dst == sys.argv[1]:
+
+            #choice of secret massge part
+            if idxSnd < numParts:
+                sndMessage = splitMessage[idxSnd]
+            else:
+                sndMessage = origIcmpData
+            idxSnd += 1
+
+            #injection of secret message to ICMP Data field behind the timestamp
+            icmpData[:len(sndMessage)] = [ord(i) for i in sndMessage]
+
+
+        #steps for both received and sent packets
+        #data type conversion
+        modifIcmpData = bytes(icmpData)
+
+        #replacement of Raw layer payload
+        scapyPkt[Raw].remove_payload()
+        scapyPkt[Raw].load = modifIcmpData
+
+        #recalculation of IP packet length and ICMP checksum
+        del scapyPkt[IP].len
+        del scapyPkt[ICMP].chksum
+
+
+    #conversion to a NetfilterQueue object and forwarding
+    pkt.set_payload(bytes(scapyPkt))
+    pkt.accept()
+
+
+#check for number of arguments
+if len(sys.argv) != 3:
+    print('Unsupported number of arguments!\nThe correct syntax is problem1.py <destination IP address> <secret message>')
+    sys.exit(1)
+
+#check for destination IP address validity
+if not isAnIP(sys.argv[1]):
+    print('Destination IP address is not valid!')
+    sys.exit(1)
+
+
+#parsing message to a variable
+message = sys.argv[2]
+numChars = len(message)
+
+#division of message to parts
+#with length of 1458 bytes
+lenPart = 1458
+numParts = math.ceil(numChars / lenPart)
+splitMessage = [message[i:i+lenPart] for i in range(0, numChars, lenPart)]
+print('Secret message has ' + str(numChars) + ' characters, which would be injected into ' + str(numParts) + ' ICMP Echo Request messages.\nThe script could be ended by pressing Ctrl+C.')
+
+
+#definition of original content of ICMP Data field
+origIcmpData = '\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !"#$%&\'()*+,-./01234567'
+
+#preallocation of sent packets index
+idxSnd = 0
+
+
+#establishing iptables rules and NetfilterQueue queues
+os.system('sudo iptables -A INPUT -s ' + sys.argv[1] + ' -p icmp -j NFQUEUE --queue-num 1; sudo iptables -A OUTPUT -d ' + sys.argv[1] + ' -p icmp -j NFQUEUE --queue-num 1; sleep 1')
+nfqueue = NetfilterQueue()
+nfqueue.bind(1, process)
+
+#running the queue
+try:
+    nfqueue.run()
+except KeyboardInterrupt:
+    print('')
+
+#ending the queue and disabling iptables rules
+nfqueue.unbind()
+os.system('sleep 1; sudo iptables -D OUTPUT -d ' + sys.argv[1] + ' -p icmp -j NFQUEUE --queue-num 1; sudo iptables -D INPUT -s ' + sys.argv[1] + ' -p icmp -j NFQUEUE --queue-num 1')
